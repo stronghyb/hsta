@@ -1,0 +1,148 @@
+# 导入库
+# 从 transformers 库中导入 BertTokenizer 类，用于对文本进行分词处理
+from transformers import BertTokenizer
+# 从 transformers 库中导入 BartForConditionalGeneration 类，这是一个用于条件生成任务的预训练模型；
+# 导入 TrainingArguments 类，用于配置训练过程中的各种参数；
+# 导入 Trainer 类，用于简化模型的训练和评估过程
+from transformers import BartForConditionalGeneration, TrainingArguments, Trainer
+# 从 datasets 库中导入 Dataset 类，用于创建和管理数据集
+from datasets import Dataset
+# 导入 json 模块，用于处理 JSON 格式的数据
+import json
+
+# 加载预训练模型的分词器和模型
+# 定义输入文本和目标文本的最大长度，超过该长度的文本将被截断
+max_length = 128
+# 指定预训练模型的路径或名称，这里假设本地有一个名为 'bart-chinese' 的预训练模型
+model_path = 'bart-chinese'
+# 定义训练和评估时每个设备（如 GPU）上的批量大小
+batch_size = 64
+# 从指定路径加载预训练的 BartForConditionalGeneration 模型
+model = BartForConditionalGeneration.from_pretrained(model_path)
+# 从指定路径加载预训练的 BertTokenizer 分词器
+tokenizer = BertTokenizer.from_pretrained(model_path)
+
+# 预处理函数
+# 定义一个名为 preprocess_function 的函数，用于对输入的文本数据进行预处理
+def preprocess_function(examples):
+    # 使用分词器对输入文本进行处理，设置最大长度为 max_length，
+    # 超过该长度的文本将被截断（truncation=True），
+    # 不足最大长度的文本将填充到最大长度（padding='max_length'），
+    # 并返回 PyTorch 张量（return_tensors='pt'）
+    inputs = tokenizer(examples['text'], max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
+    # 同样地，对目标文本进行处理
+    targets = tokenizer(examples['target'], max_length=max_length, truncation=True, padding='max_length', return_tensors='pt')
+    # 将目标文本的输入 ID 添加到输入字典中，作为模型训练时的标签
+    inputs['labels'] = targets['input_ids']
+    # 返回处理后的输入字典
+    return inputs
+
+# 加载并处理数据
+# 打开名为 'train_data.json' 的 JSON 文件，使用 UTF-8 编码读取数据
+with open('train_data.json', encoding='utf-8') as f:
+    # 使用 json.load 函数将 JSON 数据解析为 Python 对象
+    data = json.load(f)
+# 从解析后的数据中提取所有的输入文本，存储在 texts 列表中
+texts = [i['text'] for i in data]
+# 初始化一个空列表，用于存储处理后的目标文本
+targets = []
+# 遍历数据中的每个元素的 'eventTags' 字段
+for j in [i['eventTags'] for i in data]:
+    # 初始化一个集合，用于存储事件涉及的公司名称，集合可以自动去重
+    eventCompany = set()
+    # 初始化一个集合，用于存储事件类型，集合可以自动去重
+    eventType = set()
+    # 遍历每个 'eventTags' 中的元素
+    for k in j:
+        # 将事件涉及的公司名称添加到 eventCompany 集合中
+        eventCompany.add(k['eventCompany'])
+        # 将事件类型添加到 eventType 集合中
+        eventType.add(k['eventType'])
+    # 将事件类型和涉及的公司名称格式化为字符串，并添加到 targets 列表中
+    targets.append(f'{list(eventType)[0]}:{"、".join(list(eventCompany))}')
+# 使用 Dataset.from_dict 函数将 texts 和 targets 列表转换为一个数据集对象
+dataset = Dataset.from_dict({'text': texts, 'target': targets})
+# 使用 map 方法对数据集应用 preprocess_function 进行预处理，
+# batched=True 表示对数据进行批量处理
+dataset = dataset.map(preprocess_function, batched=True)
+
+# 分割数据集
+# 使用 train_test_split 方法将数据集分割为训练集和测试集，
+# test_size=0.1 表示测试集占总数据集的 10%，
+# seed=100 用于设置随机种子，确保每次分割的结果一致
+new_dataset = dataset.train_test_split(test_size=0.1, seed=100)
+# 从分割后的结果中提取训练集
+train_dataset = new_dataset['train']
+# 从分割后的结果中提取测试集，这里将其作为评估集
+eval_dataset = new_dataset['test']
+
+# 定义训练参数
+# 创建一个 TrainingArguments 对象，用于配置模型的训练参数
+train_args = TrainingArguments(
+    # 指定训练过程中模型和日志文件的输出目录
+    output_dir='./results',
+    # 评估策略，设置为按步数进行评估
+    eval_strategy='steps',
+    # 每训练 1 步进行一次评估
+    eval_steps=1,
+    # 学习率，控制模型参数更新的步长
+    learning_rate=2e-4,
+    # 每个设备上的训练批量大小
+    per_device_train_batch_size=batch_size,
+    # 每个设备上的评估批量大小
+    per_device_eval_batch_size=batch_size,
+    # 训练的总轮数
+    num_train_epochs=3,
+    # 权重衰减率，用于防止模型过拟合
+    weight_decay=0.01,
+    # 每训练 1 步记录一次日志
+    logging_steps=1,
+    # 最多保存 2 个模型检查点
+    save_total_limit=2,
+    # 每训练 1 步保存一次模型检查点
+    save_steps=1,
+    # 梯度累积步数，用于模拟更大的批量大小
+    gradient_accumulation_steps=1,
+)
+
+# 初始化 Trainer
+# 创建一个 Trainer 对象，用于管理模型的训练和评估过程
+trainer = Trainer(
+    # 指定要训练的模型
+    model=model,
+    # 指定训练参数
+    args=train_args,
+    # 指定训练数据集
+    train_dataset=train_dataset,
+    # 指定评估数据集
+    eval_dataset=eval_dataset,
+)
+
+# 开始训练
+# 调用 Trainer 对象的 train 方法开始训练模型
+trainer.train()
+
+# 开始预测，只挑前 5 条并展示
+# 从评估数据集中选择前 5 条数据
+new_eval_dataset = eval_dataset.select(range(5))
+# 定义一个名为 pre_map 的函数，用于对输入数据进行预测
+def pre_map(batch):
+    # 使用分词器对输入文本进行处理，设置最大长度为 max_length，
+    # 超过该长度的文本将被截断（truncation=True），
+    # 不足最大长度的文本将填充到最大长度（padding='max_length'），
+    # 并返回 PyTorch 张量（return_tensors="pt"）
+    inputs = tokenizer(batch['text'], max_length=max_length, truncation=True, padding='max_length', return_tensors="pt")
+    # 使用模型对输入进行生成操作，指定最大生成长度为 128
+    outputs = model.generate(
+        inputs["input_ids"],
+        attention_mask=inputs["attention_mask"],
+        max_length=128,
+    )
+    # 将生成的输出解码为文本，并去除特殊标记，然后将结果添加到 batch 字典中
+    batch['pre_target'] = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0].replace(' ', '')
+    return batch
+# 使用 map 方法对新的评估数据集应用 pre_map 函数进行预测
+results = new_eval_dataset.map(pre_map)
+# 遍历预测结果中的目标文本和预测文本，将它们打印出来进行对比
+for i, j in zip(results['target'], results['pre_target']):
+    print(i, '  ', j)

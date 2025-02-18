@@ -1,0 +1,130 @@
+# 导入 torchvision 库，它提供了许多用于计算机视觉任务的工具和数据集
+import torchvision
+# 导入 PyTorch 库，是一个用于深度学习的开源框架
+import torch
+# 从 torchvision 中导入 datasets 和 transforms 模块
+# datasets 模块包含了常见的图像数据集，transforms 模块用于图像的预处理
+from torchvision import datasets, transforms
+# 导入 PyTorch 的神经网络模块，用于定义神经网络的层和损失函数等
+import torch.nn as nn
+# 导入 PyTorch 的优化器模块，用于定义优化算法，如随机梯度下降等
+import torch.optim as optim
+# 从自定义的 resnet_model 模块中导入 ResNet18 类，这是一个自定义的 ResNet-18 模型
+from resnet_model import ResNet18
+# 导入 PyTorch 的剪枝模块，用于对神经网络进行剪枝操作
+import torch.nn.utils.prune as prune
+
+# 准备数据集并预处理
+# 定义训练集的图像预处理操作
+transform_train = transforms.Compose([
+    # 先在图像四周填充 0，然后随机裁剪成 32x32 的图像，增加数据的多样性
+    transforms.RandomCrop(32, padding=4),  
+    # 图像有一半的概率进行水平翻转，进一步增加数据的多样性
+    transforms.RandomHorizontalFlip(),  
+    # 将图像转换为 PyTorch 的张量
+    transforms.ToTensor(),
+    # 对图像进行归一化处理，将像素值归一化到 [-1, 1] 范围
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+# 定义测试集的图像预处理操作
+transform_test = transforms.Compose([
+    # 先在图像四周填充 0，然后随机裁剪成 32x32 的图像
+    transforms.RandomCrop(32, padding=4),
+    # 将图像转换为 PyTorch 的张量
+    transforms.ToTensor(),
+    # 对图像进行归一化处理，将像素值归一化到 [-1, 1] 范围
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+
+# 定义训练和测试时的批量大小
+BATCH_SIZE = 64
+# 从指定的训练数据集目录 './data/train' 加载图像数据，并应用训练集的预处理操作
+trainset = torchvision.datasets.ImageFolder(root='./data/train', transform=transform_train)  
+# 使用 DataLoader 对训练数据集进行封装，将数据分成一个个的 batch 进行批训练，同时打乱数据顺序
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)  
+# 从指定的测试数据集目录 './data/test' 加载图像数据，并应用测试集的预处理操作
+testset = torchvision.datasets.ImageFolder(root='./data/test', transform=transform_test)
+# 使用 DataLoader 对测试数据集进行封装，将数据分成一个个的 batch，同时打乱数据顺序
+testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=True, num_workers=2)
+
+# 初始化 ResNet18 模型
+model = ResNet18()
+# 定义损失函数为交叉熵损失函数，常用于多分类问题
+loss_fn = nn.CrossEntropyLoss()  
+# 定义优化器为随机梯度下降（SGD），并采用动量（momentum）和 L2 正则化（权重衰减）
+optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=5e-4) 
+
+# 定义训练模型的函数
+def train_model(model, train_loader, epochs, optimizer):
+    # 将模型设置为训练模式
+    model.train()
+    # 循环训练指定的轮数
+    for epoch in range(epochs):
+        # 遍历训练数据集中的每个 batch
+        for images, labels in train_loader:
+            # 前向传播，将图像输入模型得到输出
+            outputs = model(images)
+            # 计算模型输出和真实标签之间的损失
+            loss = loss_fn(outputs, labels)
+            # 清空优化器中的梯度信息
+            optimizer.zero_grad()
+            # 反向传播，计算损失函数关于模型参数的梯度
+            loss.backward()
+            # 根据计算得到的梯度更新模型的参数
+            optimizer.step()
+        # 打印当前轮数和损失值
+        print('Epoch {}, Loss: {:.4f}'.format(epoch + 1, loss.item()))
+
+# 调用训练函数，对模型进行 1 轮训练
+train_model(model, trainloader, 1, optimizer)
+
+# 选择要进行剪枝的模型层
+prune_layers = [
+    # 选择第一个残差块（Residual Block）中的第一个卷积层
+    model.layer1[1].left[0],   
+    # 选择第二个残差块中的第一个卷积层
+    model.layer2[1].left[0],   
+    # 选择第三个残差块中的第一个卷积层
+    model.layer3[1].left[0],   
+    # 选择第四个残差块中的第一个卷积层
+    model.layer4[1].left[0]    
+]
+# 定义剪枝比例，这里表示要剪去 50% 的通道
+pruning_rate = 0.5
+# 对选择的层进行剪枝操作，使用 L1 非结构化剪枝方法，对权重进行剪枝
+for layer in prune_layers:
+    prune.l1_unstructured(layer, name="weight", amount=pruning_rate)
+# 计算剪枝后模型的总参数数量
+total_params = sum(p.numel() for p in model.parameters())
+# 打印剪枝后模型的总参数数量
+print(f"Total parameters: {total_params}")
+# 保存剪枝后模型的权重到文件 'resnet18_pruned.pth'
+torch.save(model.state_dict(), "resnet18_pruned.pth")
+
+# 重新定义优化器，调整学习率
+optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+# 对剪枝后的模型进行 1 轮重新训练
+train_model(model, trainloader, 1, optimizer)
+
+# 将模型设置为评估模式
+model.eval()
+# 初始化正确预测的样本数量
+correct = 0
+# 初始化总的样本数量
+total = 0
+# 在不计算梯度的模式下进行测试
+with torch.no_grad():
+    # 遍历测试数据集中的每个 batch
+    for inputs, labels in testloader:
+        # 将输入数据输入模型得到输出
+        outputs = model(inputs)
+        # 获取模型输出中概率最大的类别索引
+        _, predicted = torch.max(outputs.data, 1)
+        # 累加当前 batch 的样本数量
+        total += labels.size(0)
+        # 累加当前 batch 中预测正确的样本数量
+        correct += (predicted == labels).sum().item()
+# 计算测试集上的准确率
+accuracy = 100 * correct / total
+# 打印测试集上的准确率
+print(f"Test Accuracy: {accuracy}%")
